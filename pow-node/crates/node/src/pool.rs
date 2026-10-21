@@ -3,8 +3,8 @@ use alloy::consensus::{Transaction as TxTrait, TxEnvelope, TxType};
 use alloy::eips::Decodable2718;
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256};
 use primitives::{
-    constants::{CHAIN_ID, GAS_PRICE, TRANSFER_GAS},
-    node::{BlockState, PendingTransaction},
+    constants::{BLOCK_GAS_LIMIT, CHAIN_ID, GAS_PRICE},
+    node::{BlockState, PendingTransaction, intrinsic_gas},
 };
 
 /// A signed transaction that has been decoded and checked against the protocol
@@ -13,7 +13,9 @@ struct DecodedTransaction {
     hash: B256,
     from: Address,
     to: Address,
+    is_create: bool,
     value: U256,
+    input: Bytes,
     nonce: u64,
     gas: u64,
     gas_price: u128,
@@ -59,27 +61,19 @@ fn decode_and_check(raw: &Bytes) -> Result<DecodedTransaction, anyhow::Error> {
         None => CHAIN_ID,
     };
 
-    // No EVM means no contract creation.
-    let to = match envelope.kind() {
-        TxKind::Call(to) => to,
-        TxKind::Create => anyhow::bail!(
-            "contract creation is not supported: this node has no EVM and only \
-             processes ETH transfers"
-        ),
+    let (to, is_create) = match envelope.kind() {
+        TxKind::Call(to) => (to, false),
+        TxKind::Create => (Address::ZERO, true),
     };
 
-    // ...and no contract calls either. Calldata would need an interpreter.
-    if !envelope.input().is_empty() {
-        anyhow::bail!(
-            "transaction carries {} bytes of calldata: this node has no EVM and \
-             only processes plain ETH transfers",
-            envelope.input().len()
-        );
-    }
-
+    let input = envelope.input().clone();
+    let min_gas = intrinsic_gas(&input, is_create);
     let gas = envelope.gas_limit();
-    if gas < TRANSFER_GAS {
-        anyhow::bail!("gas limit {gas} is below the intrinsic cost of a transfer ({TRANSFER_GAS})");
+    if gas < min_gas {
+        anyhow::bail!("gas limit {gas} is below the intrinsic cost of this transaction ({min_gas})");
+    }
+    if gas > BLOCK_GAS_LIMIT {
+        anyhow::bail!("gas limit {gas} exceeds the block gas limit ({BLOCK_GAS_LIMIT})");
     }
 
     let gas_price = envelope.max_fee_per_gas();
@@ -92,7 +86,9 @@ fn decode_and_check(raw: &Bytes) -> Result<DecodedTransaction, anyhow::Error> {
         hash: *envelope.tx_hash(),
         from,
         to,
+        is_create,
         value: envelope.value(),
+        input,
         nonce: envelope.nonce(),
         gas,
         gas_price,
@@ -145,8 +141,7 @@ pub fn admit(state: &mut BlockState, raw: &Bytes) -> Result<B256, anyhow::Error>
     }
 
     // Ethereum reserves the full gas limit up front and refunds whatever the
-    // transaction does not burn. Breeja always burns exactly the intrinsic cost,
-    // but it reserves the limit anyway so the accounting matches.
+    // transaction does not burn.
     let max_cost = tx.value + U256::from(tx.gas) * U256::from(tx.gas_price);
     let available = state.get_pending_balance(&tx.from);
     if available < max_cost {
@@ -161,7 +156,9 @@ pub fn admit(state: &mut BlockState, raw: &Bytes) -> Result<B256, anyhow::Error>
         hash: tx.hash,
         from: tx.from,
         to: tx.to,
+        is_create: tx.is_create,
         value: tx.value,
+        input: tx.input,
         nonce: tx.nonce,
         gas: tx.gas,
         gas_price: tx.gas_price,

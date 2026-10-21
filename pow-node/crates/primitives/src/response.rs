@@ -5,24 +5,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     constants::{EXTRA_DATA, TRANSFER_GAS},
-    node::{Block, Transaction, TransactionReceipt},
+    node::{Block, Log, Transaction, TransactionReceipt, compute_logs_bloom},
 };
 
 /// Encodes a number as an Ethereum *quantity*: minimal hex, `0x0` for zero.
-///
-/// Works for every integer width the node uses, including `U256`, because they
-/// all format the same way under `{:#x}`.
 pub fn quantity(value: impl LowerHex) -> String {
     format!("{value:#x}")
 }
 
-/// Encodes a `u64` as a fixed-width 8-byte *data* field, which is how a block's
-/// proof-of-work nonce appears on the wire.
+/// Encodes a `u64` as a fixed-width 8-byte *data* field.
 pub fn data_u64(value: u64) -> String {
     format!("0x{value:016x}")
 }
 
-/// Encodes an address as lowercase hex, the form Ethereum nodes return.
+/// Encodes an address as lowercase hex.
 pub fn data_address(address: &Address) -> String {
     format!("{address:#x}")
 }
@@ -35,6 +31,41 @@ pub fn data_hash(hash: &B256) -> String {
 /// Encodes a byte string as lowercase hex, `0x` when empty.
 pub fn data_bytes(bytes: &Bytes) -> String {
     format!("0x{}", alloy::hex::encode(bytes))
+}
+
+/// A single log entry as returned inside a receipt or by `eth_getLogs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogResponse {
+    pub address: String,
+    pub topics: Vec<String>,
+    pub data: String,
+    pub block_number: String,
+    pub transaction_hash: String,
+    pub transaction_index: String,
+    pub block_hash: String,
+    pub log_index: String,
+    pub removed: bool,
+}
+
+impl LogResponse {
+    pub fn from_receipt_log(
+        receipt: &TransactionReceipt,
+        log: &Log,
+        log_index: u64,
+    ) -> Self {
+        Self {
+            address: data_address(&log.address),
+            topics: log.topics.iter().map(data_hash).collect(),
+            data: data_bytes(&log.data),
+            block_number: quantity(receipt.block_number),
+            transaction_hash: data_hash(&receipt.transaction_hash),
+            transaction_index: quantity(receipt.transaction_index),
+            block_hash: data_hash(&receipt.block_hash),
+            log_index: quantity(log_index),
+            removed: false,
+        }
+    }
 }
 
 /// A block, as `eth_getBlockByNumber` and `eth_getBlockByHash` return it.
@@ -57,8 +88,6 @@ pub struct BlockResponse {
     pub extra_data: String,
     pub nonce: String,
     pub size: String,
-    /// Transaction hashes, or full transaction objects when the caller asked for
-    /// them with the `fullTransactions` flag.
     pub transactions: Vec<serde_json::Value>,
 }
 
@@ -72,13 +101,12 @@ pub struct TransactionResponse {
     pub transaction_index: String,
     pub chain_id: String,
     pub from: String,
-    pub to: String,
+    pub to: Option<String>,
     pub value: String,
     pub nonce: String,
     pub gas: String,
     pub gas_price: String,
     pub input: String,
-    /// Always `0x0`: Breeja only accepts pre-EIP-1559 legacy transactions.
     #[serde(rename = "type")]
     pub tx_type: String,
     pub v: String,
@@ -95,14 +123,13 @@ pub struct TransactionReceiptResponse {
     pub block_hash: String,
     pub block_number: String,
     pub from: String,
-    pub to: String,
+    pub to: Option<String>,
     pub gas_used: String,
     pub cummulative_gas_used: String,
+    #[serde(rename = "cumulativeGasUsed")]
+    pub cumulative_gas_used: String,
     pub effective_gas_price: String,
-    /// Always `null`: deploying a contract needs an EVM, so Breeja rejects it.
     pub contract_address: Option<String>,
-    /// Always empty: logs are emitted by the `LOG*` opcodes, and there is no EVM
-    /// to execute them.
     pub logs: Vec<serde_json::Value>,
     pub logs_bloom: String,
     pub status: String,
@@ -111,10 +138,6 @@ pub struct TransactionReceiptResponse {
 }
 
 impl BlockResponse {
-    /// Converts a stored block into its JSON-RPC form.
-    ///
-    /// `transactions` is supplied by the caller because `eth_getBlockBy*` takes a
-    /// flag choosing between bare hashes and full transaction objects.
     pub fn from_block(block: &Block, transactions: Vec<serde_json::Value>) -> Self {
         Self {
             number: quantity(block.number),
@@ -146,7 +169,11 @@ impl From<&Transaction> for TransactionResponse {
             transaction_index: quantity(tx.transaction_index),
             chain_id: quantity(tx.chain_id),
             from: data_address(&tx.from),
-            to: data_address(&tx.to),
+            to: if tx.is_create {
+                None
+            } else {
+                Some(data_address(&tx.to))
+            },
             value: quantity(tx.value),
             nonce: quantity(tx.nonce),
             gas: quantity(tx.gas),
@@ -162,39 +189,54 @@ impl From<&Transaction> for TransactionResponse {
 
 impl From<&TransactionReceipt> for TransactionReceiptResponse {
     fn from(receipt: &TransactionReceipt) -> Self {
+        let logs: Vec<serde_json::Value> = receipt
+            .logs
+            .iter()
+            .enumerate()
+            .map(|(idx, log)| {
+                serde_json::to_value(LogResponse::from_receipt_log(receipt, log, idx as u64))
+                    .expect("a log response always serializes")
+            })
+            .collect();
+
+        let bloom_bytes = if receipt.logs_bloom.len() == 256 {
+            receipt.logs_bloom.clone()
+        } else {
+            compute_logs_bloom(&receipt.logs)
+        };
+
+        let cum_gas = quantity(receipt.cummulative_gas_used);
+
         Self {
             transaction_hash: data_hash(&receipt.transaction_hash),
             transaction_index: quantity(receipt.transaction_index),
             block_hash: data_hash(&receipt.block_hash),
             block_number: quantity(receipt.block_number),
             from: data_address(&receipt.from),
-            to: data_address(&receipt.to),
+            to: if receipt.is_create {
+                None
+            } else {
+                Some(data_address(&receipt.to))
+            },
             gas_used: quantity(receipt.gas_used),
-            cummulative_gas_used: quantity(receipt.cummulative_gas_used),
+            cummulative_gas_used: cum_gas.clone(),
+            cumulative_gas_used: cum_gas,
             effective_gas_price: quantity(receipt.effective_gas_price),
-            contract_address: None,
-            logs: Vec::new(),
-            // A bloom filter over no logs is 256 zero bytes.
-            logs_bloom: format!("0x{}", "00".repeat(256)),
+            contract_address: receipt.contract_address.as_ref().map(data_address),
+            logs,
+            logs_bloom: data_bytes(&bloom_bytes),
             status: quantity(receipt.status),
             tx_type: "0x0".to_owned(),
         }
     }
 }
 
-/// Approximates a block's serialized size in bytes.
-///
-/// A real node reports the length of the block's RLP encoding. Breeja estimates
-/// it from the header plus its transactions, which is enough for a client that
-/// only wants a rough figure.
 fn block_size(block: &Block) -> u64 {
     const HEADER_BYTES: u64 = 180;
     const TX_BYTES: u64 = 110;
     HEADER_BYTES + EXTRA_DATA.len() as u64 + block.transactions.len() as u64 * TX_BYTES
 }
 
-/// Gas a plain transfer costs. Returned by `eth_estimateGas`, where it is the
-/// only answer a node without an EVM can give.
 pub const TRANSFER_GAS_ESTIMATE: u64 = TRANSFER_GAS;
 
 #[cfg(test)]

@@ -11,7 +11,8 @@ use primitives::constants::RPC_ADDRESS;
 
 use crate::handlers::{
     block_number_handler, call_handler, chain_id_handler, estimate_gas_handler,
-    get_balance_handler, get_block_by_hash_handler, get_block_by_number_handler,
+    gas_price_handler, get_balance_handler, get_block_by_hash_handler,
+    get_block_by_number_handler, get_code_handler, get_logs_handler, get_storage_at_handler,
     get_transaction_by_hash_handler, get_transaction_count_handler,
     get_transaction_receipt_handler, send_raw_transaction_handler,
 };
@@ -43,6 +44,10 @@ pub async fn start_server(
         chain_id_handler()
     })?;
 
+    module.register_method("eth_gasPrice", |_params, _context, _extensions| {
+        gas_price_handler()
+    })?;
+
     module.register_method("eth_blockNumber", |_params, context, _extensions| {
         block_number_handler(context)
     })?;
@@ -65,7 +70,6 @@ pub async fn start_server(
         |params, context, _extensions| get_transaction_receipt_handler(params, context),
     )?;
 
-
     module.register_method("eth_getBalance", |params, context, _extensions| {
         get_balance_handler(params, context)
     })?;
@@ -74,11 +78,21 @@ pub async fn start_server(
         get_transaction_count_handler(params, context)
     })?;
 
+    module.register_method("eth_getCode", |params, context, _extensions| {
+        get_code_handler(params, context)
+    })?;
+
+    module.register_method("eth_getStorageAt", |params, context, _extensions| {
+        get_storage_at_handler(params, context)
+    })?;
+
+    module.register_method("eth_getLogs", |params, context, _extensions| {
+        get_logs_handler(params, context)
+    })?;
 
     module.register_method("eth_sendRawTransaction", |params, context, _extensions| {
         send_raw_transaction_handler(params, context)
     })?;
-
 
     module.register_method("eth_call", |params, context, _extensions| {
         call_handler(params, context)

@@ -38,7 +38,7 @@ pub fn sign_transfer_with(
 ) -> Result<Bytes, anyhow::Error> {
     let signer: PrivateKeySigner = private_key.parse()?;
 
-    // 1. The unsigned transaction. `input` is empty because this node has no EVM.
+    // 1. The unsigned transaction.
     let tx = TxLegacy {
         chain_id: Some(CHAIN_ID),
         nonce,
@@ -57,6 +57,59 @@ pub fn sign_transfer_with(
     let mut encoded = Vec::new();
     signed.encode_2718(&mut encoded);
 
+    Ok(Bytes::from(encoded))
+}
+
+/// Signs a contract creation transaction (`TxKind::Create`) and encodes it for
+/// `eth_sendRawTransaction`.
+pub fn sign_deploy(
+    private_key: &str,
+    initcode: Bytes,
+    value: U256,
+    nonce: u64,
+    gas_limit: u64,
+) -> Result<Bytes, anyhow::Error> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let tx = TxLegacy {
+        chain_id: Some(CHAIN_ID),
+        nonce,
+        gas_price: GAS_PRICE,
+        gas_limit,
+        to: TxKind::Create,
+        value,
+        input: initcode,
+    };
+    let signature = signer.sign_hash_sync(&tx.signature_hash())?;
+    let signed = tx.into_signed(signature);
+    let mut encoded = Vec::new();
+    signed.encode_2718(&mut encoded);
+    Ok(Bytes::from(encoded))
+}
+
+/// Signs a contract call transaction (`TxKind::Call(to)` with calldata) and
+/// encodes it for `eth_sendRawTransaction`.
+pub fn sign_call(
+    private_key: &str,
+    to: Address,
+    calldata: Bytes,
+    value: U256,
+    nonce: u64,
+    gas_limit: u64,
+) -> Result<Bytes, anyhow::Error> {
+    let signer: PrivateKeySigner = private_key.parse()?;
+    let tx = TxLegacy {
+        chain_id: Some(CHAIN_ID),
+        nonce,
+        gas_price: GAS_PRICE,
+        gas_limit,
+        to: TxKind::Call(to),
+        value,
+        input: calldata,
+    };
+    let signature = signer.sign_hash_sync(&tx.signature_hash())?;
+    let signed = tx.into_signed(signature);
+    let mut encoded = Vec::new();
+    signed.encode_2718(&mut encoded);
     Ok(Bytes::from(encoded))
 }
 

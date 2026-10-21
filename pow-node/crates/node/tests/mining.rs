@@ -2,16 +2,17 @@
 
 use std::time::{Duration, Instant};
 
-use alloy::primitives::{Address, B256, U256};
+use alloy::primitives::{Address, B256, Bytes, U256};
 use node::{
     Chain, ChainConfig, miner,
     testing::{
-        DEV_PRIVATE_KEY, DEV_PRIVATE_KEY_1, address_of, one_eth, sign_transfer, sign_transfer_with,
+        DEV_PRIVATE_KEY, DEV_PRIVATE_KEY_1, address_of, one_eth, sign_call, sign_deploy,
+        sign_transfer, sign_transfer_with,
     },
 };
 use primitives::{
     constants::{GAS_PRICE, TRANSFER_GAS},
-    node::BreejaGenesis,
+    node::{BreejaGenesis, derive_contract_address},
 };
 
 /// A chain that mines almost instantly, so tests do not spend real time hashing.
@@ -315,3 +316,55 @@ fn a_new_transaction_makes_the_miner_rebuild_its_candidate_block() {
         "a transaction submitted while mining was already underway still got mined"
     );
 }
+
+#[test]
+fn a_contract_is_deployed_and_called_across_mined_blocks() {
+    let alice = address_of(DEV_PRIVATE_KEY).unwrap();
+    let chain = test_chain(&[(alice, one_eth() * U256::from(100u64))]);
+
+    let initcode: Bytes = "0x600b600c600039600b6000f3602a60005560006000a000"
+        .parse()
+        .unwrap();
+    let expected_contract = derive_contract_address(alice, 0);
+
+    let deploy_raw = sign_deploy(DEV_PRIVATE_KEY, initcode, U256::ZERO, 0, 100_000).unwrap();
+    let deploy_hash = chain.submit_raw_transaction(&deploy_raw).unwrap();
+
+    let call_raw = sign_call(
+        DEV_PRIVATE_KEY,
+        expected_contract,
+        Bytes::new(),
+        U256::ZERO,
+        1,
+        100_000,
+    )
+    .unwrap();
+    let call_hash = chain.submit_raw_transaction(&call_raw).unwrap();
+
+    let handle = miner::spawn(chain.clone());
+    wait_for(
+        Duration::from_secs(10),
+        "deploy and call to be mined",
+        || {
+            let s = chain.read();
+            s.get_receipt(&deploy_hash).is_some() && s.get_receipt(&call_hash).is_some()
+        },
+    );
+    chain.shutdown();
+    handle.join().unwrap();
+
+    let state = chain.read();
+    let deploy_receipt = state.get_receipt(&deploy_hash).unwrap();
+    assert_eq!(deploy_receipt.status, 1);
+    assert_eq!(deploy_receipt.contract_address, Some(expected_contract));
+    assert!(!state.get_code(&expected_contract).is_empty());
+
+    let call_receipt = state.get_receipt(&call_hash).unwrap();
+    assert_eq!(call_receipt.status, 1);
+    assert_eq!(
+        state.get_storage(&expected_contract, U256::ZERO),
+        U256::from(42u64)
+    );
+    assert_eq!(call_receipt.logs.len(), 1);
+}
+

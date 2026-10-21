@@ -22,7 +22,7 @@ use primitives::{
     node::{Block, BlockHeader, retarget_difficulty},
 };
 
-use crate::{chain::Chain, executor::execute_block, pow};
+use crate::{chain::Chain, pow};
 
 /// Starts the miner on its own OS thread.
 ///
@@ -51,19 +51,35 @@ fn run(chain: Chain) {
     while !chain.is_shutting_down() {
         // snapshot the chain, holding the read lock only briefly
         let generation = chain.mempool_generation();
-        let (accounts, parent, batch) = {
+        let (accounts, parent, batch, block_hashes) = {
             let state = chain.read();
             (
                 state.accounts_snapshot(),
                 state.head().clone(),
                 state.peek_mempool_batch(),
+                state.block_hashes_snapshot(),
             )
         };
 
         let number = parent.number + 1;
+        // A block's timestamp must advance, even if the system clock does not.
+        let timestamp = unix_now().max(parent.timestamp + 1);
+        let block_ctx = crate::evm::BlockContext {
+            number,
+            miner: config.miner,
+            timestamp,
+            gas_limit: BLOCK_GAS_LIMIT,
+            difficulty,
+            prevrandao: parent.hash,
+        };
 
         // execute the candidate block, with no lock held
-        let execution = execute_block(accounts, &batch, number, config.miner);
+        let execution = crate::executor::execute_block_with_context(
+            accounts,
+            &batch,
+            &block_ctx,
+            &block_hashes,
+        );
 
         let mut header = BlockHeader {
             number,
@@ -72,8 +88,7 @@ fn run(chain: Chain) {
             transaction_root: execution.transaction_root,
             receipts_root: execution.receipts_root,
             difficulty,
-            // A block's timestamp must advance, even if the system clock does not.
-            timestamp: unix_now().max(parent.timestamp + 1),
+            timestamp,
             gas_limit: BLOCK_GAS_LIMIT,
             gas_used: execution.gas_used,
             miner: config.miner,

@@ -1,4 +1,5 @@
 pub mod chain;
+pub mod evm;
 pub mod executor;
 pub mod miner;
 pub mod pool;
